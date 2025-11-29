@@ -9,15 +9,17 @@ import { useFhevm, useEncrypt, useDecrypt } from '../fhevm-sdk/src';
 interface TaskData {
   id: string;
   name: string;
-  description: string;
-  reward: number;
-  difficulty: number;
-  creator: string;
-  timestamp: number;
-  isVerified: boolean;
-  decryptedValue: number;
+  encryptedValue: string;
   publicValue1: number;
   publicValue2: number;
+  description: string;
+  creator: string;
+  timestamp: number;
+  decryptedValue: number;
+  isVerified: boolean;
+  status: string;
+  reward: number;
+  workerCount: number;
 }
 
 const App: React.FC = () => {
@@ -32,17 +34,24 @@ const App: React.FC = () => {
     status: "pending", 
     message: "" 
   });
-  const [newTaskData, setNewTaskData] = useState({ name: "", description: "", reward: "", difficulty: "" });
+  const [newTaskData, setNewTaskData] = useState({ 
+    name: "", 
+    description: "", 
+    reward: "",
+    dataValue: "",
+    workerCount: "" 
+  });
   const [selectedTask, setSelectedTask] = useState<TaskData | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
-  const [filterDifficulty, setFilterDifficulty] = useState("all");
-  const [stats, setStats] = useState({ total: 0, verified: 0, averageReward: 0 });
+  const [filterStatus, setFilterStatus] = useState("all");
+  const [userHistory, setUserHistory] = useState<TaskData[]>([]);
+  const [showStats, setShowStats] = useState(false);
+  const [contractAddress, setContractAddress] = useState("");
+  const [fhevmInitializing, setFhevmInitializing] = useState(false);
 
   const { status, initialize, isInitialized } = useFhevm();
   const { encrypt, isEncrypting } = useEncrypt();
   const { verifyDecryption, isDecrypting: fheIsDecrypting } = useDecrypt();
-  const [contractAddress, setContractAddress] = useState("");
-  const [fhevmInitializing, setFhevmInitializing] = useState(false);
 
   useEffect(() => {
     const initFhevmAfterConnection = async () => {
@@ -104,15 +113,17 @@ const App: React.FC = () => {
           tasksList.push({
             id: businessId,
             name: businessData.name,
-            description: businessData.description,
-            reward: Number(businessData.publicValue1) || 0,
-            difficulty: Number(businessData.publicValue2) || 1,
-            creator: businessData.creator,
-            timestamp: Number(businessData.timestamp),
-            isVerified: businessData.isVerified,
-            decryptedValue: Number(businessData.decryptedValue) || 0,
+            encryptedValue: businessId,
             publicValue1: Number(businessData.publicValue1) || 0,
-            publicValue2: Number(businessData.publicValue2) || 0
+            publicValue2: Number(businessData.publicValue2) || 0,
+            description: businessData.description,
+            timestamp: Number(businessData.timestamp),
+            creator: businessData.creator,
+            decryptedValue: Number(businessData.decryptedValue) || 0,
+            isVerified: businessData.isVerified,
+            status: businessData.isVerified ? "completed" : "active",
+            reward: Number(businessData.publicValue1) || 0,
+            workerCount: Number(businessData.publicValue2) || 0
           });
         } catch (e) {
           console.error('Error loading business data:', e);
@@ -120,21 +131,15 @@ const App: React.FC = () => {
       }
       
       setTasks(tasksList);
-      updateStats(tasksList);
+      if (address) {
+        setUserHistory(tasksList.filter(task => task.creator.toLowerCase() === address.toLowerCase()));
+      }
     } catch (e) {
       setTransactionStatus({ visible: true, status: "error", message: "Failed to load data" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     } finally { 
       setIsRefreshing(false); 
     }
-  };
-
-  const updateStats = (tasksList: TaskData[]) => {
-    const total = tasksList.length;
-    const verified = tasksList.filter(t => t.isVerified).length;
-    const averageReward = total > 0 ? tasksList.reduce((sum, t) => sum + t.reward, 0) / total : 0;
-    
-    setStats({ total, verified, averageReward });
   };
 
   const createTask = async () => {
@@ -151,18 +156,18 @@ const App: React.FC = () => {
       const contract = await getContractWithSigner();
       if (!contract) throw new Error("Failed to get contract with signer");
       
-      const rewardValue = parseInt(newTaskData.reward) || 0;
+      const dataValue = parseInt(newTaskData.dataValue) || 0;
       const businessId = `task-${Date.now()}`;
       
-      const encryptedResult = await encrypt(contractAddress, address, rewardValue);
+      const encryptedResult = await encrypt(contractAddress, address, dataValue);
       
       const tx = await contract.createBusinessData(
         businessId,
         newTaskData.name,
         encryptedResult.encryptedData,
         encryptedResult.proof,
-        rewardValue,
-        parseInt(newTaskData.difficulty) || 1,
+        parseInt(newTaskData.reward) || 0,
+        parseInt(newTaskData.workerCount) || 0,
         newTaskData.description
       );
       
@@ -176,7 +181,7 @@ const App: React.FC = () => {
       
       await loadData();
       setShowCreateModal(false);
-      setNewTaskData({ name: "", description: "", reward: "", difficulty: "" });
+      setNewTaskData({ name: "", description: "", reward: "", dataValue: "", workerCount: "" });
     } catch (e: any) {
       const errorMessage = e.message?.includes("user rejected transaction") 
         ? "Transaction rejected by user" 
@@ -220,15 +225,11 @@ const App: React.FC = () => {
       );
       
       setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption on-chain..." });
-      
       const clearValue = result.decryptionResult.clearValues[encryptedValueHandle];
       
       await loadData();
-      
       setTransactionStatus({ visible: true, status: "success", message: "Data decrypted and verified successfully!" });
-      setTimeout(() => {
-        setTransactionStatus({ visible: false, status: "pending", message: "" });
-      }, 2000);
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
       
       return Number(clearValue);
       
@@ -248,31 +249,41 @@ const App: React.FC = () => {
 
   const callIsAvailable = async () => {
     try {
-      const contract = await getContractReadOnly();
+      const contract = await getContractWithSigner();
       if (!contract) return;
       
-      const result = await contract.isAvailable();
-      setTransactionStatus({ visible: true, status: "success", message: "Contract is available!" });
+      const tx = await contract.isAvailable();
+      await tx.wait();
+      
+      setTransactionStatus({ visible: true, status: "success", message: "isAvailable called successfully!" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
-    } catch (e) {
-      setTransactionStatus({ visible: true, status: "error", message: "Contract call failed" });
+    } catch (e: any) {
+      setTransactionStatus({ visible: true, status: "error", message: "Call failed: " + (e.message || "Unknown error") });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     }
   };
 
   const filteredTasks = tasks.filter(task => {
-    const matchesSearch = task.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         task.description.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesDifficulty = filterDifficulty === "all" || task.difficulty.toString() === filterDifficulty;
-    return matchesSearch && matchesDifficulty;
+    const matchesSearch = task.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                          task.description.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesFilter = filterStatus === "all" || task.status === filterStatus;
+    return matchesSearch && matchesFilter;
   });
+
+  const stats = {
+    totalTasks: tasks.length,
+    activeTasks: tasks.filter(t => t.status === "active").length,
+    completedTasks: tasks.filter(t => t.status === "completed").length,
+    totalReward: tasks.reduce((sum, t) => sum + t.reward, 0),
+    uniqueCreators: new Set(tasks.map(t => t.creator)).size
+  };
 
   if (!isConnected) {
     return (
       <div className="app-container">
         <header className="app-header">
           <div className="logo">
-            <h1>CrowdTask_Z 🛡️</h1>
+            <h1>Confidential Crowdsourcing 🔐</h1>
           </div>
           <div className="header-actions">
             <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
@@ -281,21 +292,21 @@ const App: React.FC = () => {
         
         <div className="connection-prompt">
           <div className="connection-content">
-            <div className="connection-icon">🛡️</div>
-            <h2>Connect to Confidential Crowdsourcing</h2>
-            <p>Join our privacy-preserving platform where tasks are executed with fully homomorphic encryption</p>
+            <div className="connection-icon">🔐</div>
+            <h2>Connect Your Wallet to Continue</h2>
+            <p>Please connect your wallet to access encrypted crowdsourcing platform</p>
             <div className="connection-steps">
               <div className="step">
                 <span>1</span>
-                <p>Connect your wallet to access encrypted tasks</p>
+                <p>Connect your wallet using the button above</p>
               </div>
               <div className="step">
                 <span>2</span>
-                <p>FHE system will initialize for secure computations</p>
+                <p>FHE system will automatically initialize</p>
               </div>
               <div className="step">
                 <span>3</span>
-                <p>Start working on encrypted data tasks</p>
+                <p>Start creating and working on encrypted tasks</p>
               </div>
             </div>
           </div>
@@ -309,7 +320,7 @@ const App: React.FC = () => {
       <div className="loading-screen">
         <div className="fhe-spinner"></div>
         <p>Initializing FHE Encryption System...</p>
-        <p className="loading-note">Securing your data with homomorphic encryption</p>
+        <p className="loading-note">This may take a few moments</p>
       </div>
     );
   }
@@ -317,7 +328,7 @@ const App: React.FC = () => {
   if (loading) return (
     <div className="loading-screen">
       <div className="fhe-spinner"></div>
-      <p>Loading encrypted task platform...</p>
+      <p>Loading encrypted crowdsourcing platform...</p>
     </div>
   );
 
@@ -325,13 +336,14 @@ const App: React.FC = () => {
     <div className="app-container">
       <header className="app-header">
         <div className="logo">
-          <h1>CrowdTask_Z 🛡️</h1>
-          <span className="tagline">Privacy-Preserving Crowdsourcing</span>
+          <h1>Confidential Crowdsourcing 🔐</h1>
+          <p>FHE-Protected Task Platform</p>
         </div>
         
         <div className="header-actions">
-          <button onClick={callIsAvailable} className="status-btn">
-            Check Status
+          <button onClick={callIsAvailable} className="test-btn">Test FHE</button>
+          <button onClick={() => setShowStats(!showStats)} className="stats-btn">
+            {showStats ? "Hide Stats" : "Show Stats"}
           </button>
           <button onClick={() => setShowCreateModal(true)} className="create-btn">
             + New Task
@@ -340,82 +352,115 @@ const App: React.FC = () => {
         </div>
       </header>
       
-      <div className="main-content">
+      {showStats && (
         <div className="stats-panel">
-          <div className="stat-card">
-            <div className="stat-value">{stats.total}</div>
-            <div className="stat-label">Total Tasks</div>
+          <div className="stat-item">
+            <span className="stat-value">{stats.totalTasks}</span>
+            <span className="stat-label">Total Tasks</span>
           </div>
-          <div className="stat-card">
-            <div className="stat-value">{stats.verified}</div>
-            <div className="stat-label">Verified</div>
+          <div className="stat-item">
+            <span className="stat-value">{stats.activeTasks}</span>
+            <span className="stat-label">Active</span>
           </div>
-          <div className="stat-card">
-            <div className="stat-value">{stats.averageReward.toFixed(1)}</div>
-            <div className="stat-label">Avg Reward</div>
+          <div className="stat-item">
+            <span className="stat-value">{stats.completedTasks}</span>
+            <span className="stat-label">Completed</span>
+          </div>
+          <div className="stat-item">
+            <span className="stat-value">{stats.totalReward}</span>
+            <span className="stat-label">Total Reward</span>
+          </div>
+          <div className="stat-item">
+            <span className="stat-value">{stats.uniqueCreators}</span>
+            <span className="stat-label">Creators</span>
           </div>
         </div>
-
-        <div className="search-filters">
-          <div className="search-box">
-            <input 
-              type="text" 
-              placeholder="Search tasks..." 
+      )}
+      
+      <div className="main-content">
+        <div className="controls-panel">
+          <div className="search-section">
+            <input
+              type="text"
+              placeholder="Search tasks..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
+              className="search-input"
             />
           </div>
-          <select 
-            value={filterDifficulty} 
-            onChange={(e) => setFilterDifficulty(e.target.value)}
-            className="filter-select"
-          >
-            <option value="all">All Difficulties</option>
-            <option value="1">Easy</option>
-            <option value="2">Medium</option>
-            <option value="3">Hard</option>
-          </select>
-          <button onClick={loadData} className="refresh-btn" disabled={isRefreshing}>
-            {isRefreshing ? "Refreshing..." : "Refresh"}
-          </button>
+          
+          <div className="filter-section">
+            <select 
+              value={filterStatus} 
+              onChange={(e) => setFilterStatus(e.target.value)}
+              className="filter-select"
+            >
+              <option value="all">All Tasks</option>
+              <option value="active">Active</option>
+              <option value="completed">Completed</option>
+            </select>
+          </div>
+          
+          <div className="action-section">
+            <button onClick={loadData} className="refresh-btn" disabled={isRefreshing}>
+              {isRefreshing ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
         </div>
-
+        
         <div className="tasks-grid">
           {filteredTasks.length === 0 ? (
             <div className="no-tasks">
-              <p>No tasks found matching your criteria</p>
+              <p>No tasks found</p>
               <button onClick={() => setShowCreateModal(true)} className="create-btn">
                 Create First Task
               </button>
             </div>
           ) : (
-            filteredTasks.map((task) => (
-              <TaskCard 
-                key={task.id} 
-                task={task} 
-                onSelect={setSelectedTask}
-                onDecrypt={decryptData}
-                isDecrypting={fheIsDecrypting}
-              />
+            filteredTasks.map((task, index) => (
+              <div 
+                className={`task-card ${task.status} ${selectedTask?.id === task.id ? "selected" : ""}`}
+                key={index}
+                onClick={() => setSelectedTask(task)}
+              >
+                <div className="task-header">
+                  <h3 className="task-title">{task.name}</h3>
+                  <span className={`status-badge ${task.status}`}>{task.status}</span>
+                </div>
+                <p className="task-description">{task.description}</p>
+                <div className="task-meta">
+                  <span className="reward">Reward: {task.reward} tokens</span>
+                  <span className="workers">Workers: {task.workerCount}</span>
+                </div>
+                <div className="task-footer">
+                  <span className="creator">By: {task.creator.substring(0, 6)}...{task.creator.substring(38)}</span>
+                  <span className="date">{new Date(task.timestamp * 1000).toLocaleDateString()}</span>
+                </div>
+                {task.isVerified && (
+                  <div className="verified-badge">✅ FHE Verified</div>
+                )}
+              </div>
             ))
           )}
         </div>
-
-        <div className="faq-section">
-          <h3>FHE Crowdsourcing FAQ</h3>
-          <div className="faq-item">
-            <strong>How does FHE protect my data?</strong>
-            <p>Fully Homomorphic Encryption allows computations on encrypted data without decryption, ensuring privacy throughout the task execution.</p>
+        
+        {userHistory.length > 0 && (
+          <div className="history-section">
+            <h3>Your Task History</h3>
+            <div className="history-list">
+              {userHistory.slice(0, 3).map((task, index) => (
+                <div className="history-item" key={index}>
+                  <span>{task.name}</span>
+                  <span className={`status ${task.status}`}>{task.status}</span>
+                </div>
+              ))}
+            </div>
           </div>
-          <div className="faq-item">
-            <strong>What types of tasks are supported?</strong>
-            <p>Currently supporting integer-based data labeling and analysis tasks that can be processed with homomorphic operations.</p>
-          </div>
-        </div>
+        )}
       </div>
       
       {showCreateModal && (
-        <CreateTaskModal 
+        <ModalCreateTask 
           onSubmit={createTask} 
           onClose={() => setShowCreateModal(false)} 
           creating={creatingTask} 
@@ -429,7 +474,7 @@ const App: React.FC = () => {
         <TaskDetailModal 
           task={selectedTask} 
           onClose={() => setSelectedTask(null)} 
-          onDecrypt={decryptData}
+          decryptData={() => decryptData(selectedTask.id)}
           isDecrypting={fheIsDecrypting}
         />
       )}
@@ -450,83 +495,7 @@ const App: React.FC = () => {
   );
 };
 
-const TaskCard: React.FC<{
-  task: TaskData;
-  onSelect: (task: TaskData) => void;
-  onDecrypt: (id: string) => Promise<number | null>;
-  isDecrypting: boolean;
-}> = ({ task, onSelect, onDecrypt, isDecrypting }) => {
-  const [localDecrypted, setLocalDecrypted] = useState<number | null>(null);
-
-  const handleDecrypt = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    const result = await onDecrypt(task.id);
-    if (result !== null) {
-      setLocalDecrypted(result);
-    }
-  };
-
-  const getDifficultyColor = (difficulty: number) => {
-    switch(difficulty) {
-      case 1: return "#4CAF50";
-      case 2: return "#FF9800";
-      case 3: return "#F44336";
-      default: return "#666";
-    }
-  };
-
-  return (
-    <div className="task-card" onClick={() => onSelect(task)}>
-      <div className="task-header">
-        <h3>{task.name}</h3>
-        <span 
-          className="difficulty-badge"
-          style={{ backgroundColor: getDifficultyColor(task.difficulty) }}
-        >
-          {["Easy", "Medium", "Hard"][task.difficulty - 1] || "Unknown"}
-        </span>
-      </div>
-      
-      <p className="task-description">{task.description}</p>
-      
-      <div className="task-meta">
-        <div className="meta-item">
-          <span>Reward:</span>
-          <strong>{task.reward} tokens</strong>
-        </div>
-        <div className="meta-item">
-          <span>Creator:</span>
-          <span>{task.creator.substring(0, 6)}...{task.creator.substring(38)}</span>
-        </div>
-      </div>
-      
-      <div className="task-data">
-        <div className="data-value">
-          {task.isVerified ? 
-            `Decrypted: ${task.decryptedValue}` : 
-            localDecrypted !== null ? 
-            `Local: ${localDecrypted}` : 
-            "🔒 Encrypted"
-          }
-        </div>
-        <button 
-          className={`decrypt-btn ${(task.isVerified || localDecrypted !== null) ? 'decrypted' : ''}`}
-          onClick={handleDecrypt}
-          disabled={isDecrypting}
-        >
-          {isDecrypting ? "🔓..." : task.isVerified ? "✅ Verified" : localDecrypted !== null ? "🔄 Verify" : "🔓 Decrypt"}
-        </button>
-      </div>
-      
-      <div className="task-footer">
-        <span>{new Date(task.timestamp * 1000).toLocaleDateString()}</span>
-        {task.isVerified && <span className="verified-tag">Verified</span>}
-      </div>
-    </div>
-  );
-};
-
-const CreateTaskModal: React.FC<{
+const ModalCreateTask: React.FC<{
   onSubmit: () => void; 
   onClose: () => void; 
   creating: boolean;
@@ -536,7 +505,7 @@ const CreateTaskModal: React.FC<{
 }> = ({ onSubmit, onClose, creating, taskData, setTaskData, isEncrypting }) => {
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
-    if (name === 'reward' || name === 'difficulty') {
+    if (name === 'dataValue' || name === 'reward' || name === 'workerCount') {
       const intValue = value.replace(/[^\d]/g, '');
       setTaskData({ ...taskData, [name]: intValue });
     } else {
@@ -555,7 +524,7 @@ const CreateTaskModal: React.FC<{
         <div className="modal-body">
           <div className="fhe-notice">
             <strong>FHE 🔐 Protection</strong>
-            <p>Task reward value will be encrypted with Zama FHE (Integer only)</p>
+            <p>Task data will be encrypted with Zama FHE (Integer only)</p>
           </div>
           
           <div className="form-group">
@@ -581,30 +550,43 @@ const CreateTaskModal: React.FC<{
           </div>
           
           <div className="form-group">
-            <label>Reward (Integer only) *</label>
+            <label>Data Value (Integer, FHE Encrypted) *</label>
             <input 
               type="number" 
-              name="reward" 
-              value={taskData.reward} 
+              name="dataValue" 
+              value={taskData.dataValue} 
               onChange={handleChange} 
-              placeholder="Enter reward amount..." 
+              placeholder="Enter data value..." 
+              step="1"
               min="0"
             />
             <div className="data-type-label">FHE Encrypted Integer</div>
           </div>
           
           <div className="form-group">
-            <label>Difficulty (1-3) *</label>
+            <label>Reward (Tokens) *</label>
             <input 
               type="number" 
-              name="difficulty" 
-              value={taskData.difficulty} 
+              name="reward" 
+              value={taskData.reward} 
               onChange={handleChange} 
-              placeholder="1=Easy, 2=Medium, 3=Hard"
-              min="1"
-              max="3"
+              placeholder="Enter reward amount..." 
+              step="1"
+              min="0"
             />
-            <div className="data-type-label">Public Data</div>
+          </div>
+          
+          <div className="form-group">
+            <label>Worker Count *</label>
+            <input 
+              type="number" 
+              name="workerCount" 
+              value={taskData.workerCount} 
+              onChange={handleChange} 
+              placeholder="Enter worker count..." 
+              step="1"
+              min="1"
+            />
           </div>
         </div>
         
@@ -612,7 +594,7 @@ const CreateTaskModal: React.FC<{
           <button onClick={onClose} className="cancel-btn">Cancel</button>
           <button 
             onClick={onSubmit} 
-            disabled={creating || isEncrypting || !taskData.name || !taskData.description || !taskData.reward || !taskData.difficulty} 
+            disabled={creating || isEncrypting || !taskData.name || !taskData.description || !taskData.dataValue || !taskData.reward || !taskData.workerCount} 
             className="submit-btn"
           >
             {creating || isEncrypting ? "Encrypting and Creating..." : "Create Task"}
@@ -626,16 +608,15 @@ const CreateTaskModal: React.FC<{
 const TaskDetailModal: React.FC<{
   task: TaskData;
   onClose: () => void;
-  onDecrypt: (id: string) => Promise<number | null>;
+  decryptData: () => Promise<number | null>;
   isDecrypting: boolean;
-}> = ({ task, onClose, onDecrypt, isDecrypting }) => {
-  const [localDecrypted, setLocalDecrypted] = useState<number | null>(null);
+}> = ({ task, onClose, decryptData, isDecrypting }) => {
+  const [decryptedValue, setDecryptedValue] = useState<number | null>(null);
 
   const handleDecrypt = async () => {
-    const result = await onDecrypt(task.id);
-    if (result !== null) {
-      setLocalDecrypted(result);
-    }
+    if (task.isVerified) return;
+    const value = await decryptData();
+    setDecryptedValue(value);
   };
 
   return (
@@ -648,64 +629,78 @@ const TaskDetailModal: React.FC<{
         
         <div className="modal-body">
           <div className="task-info">
-            <div className="info-item">
+            <div className="info-row">
               <span>Task Name:</span>
               <strong>{task.name}</strong>
             </div>
-            <div className="info-item">
-              <span>Description:</span>
-              <p>{task.description}</p>
-            </div>
-            <div className="info-item">
+            <div className="info-row">
               <span>Creator:</span>
-              <strong>{task.creator}</strong>
+              <strong>{task.creator.substring(0, 6)}...{task.creator.substring(38)}</strong>
             </div>
-            <div className="info-item">
+            <div className="info-row">
               <span>Created:</span>
-              <strong>{new Date(task.timestamp * 1000).toLocaleString()}</strong>
+              <strong>{new Date(task.timestamp * 1000).toLocaleDateString()}</strong>
             </div>
-            <div className="info-item">
-              <span>Difficulty:</span>
-              <strong>{["Easy", "Medium", "Hard"][task.difficulty - 1] || "Unknown"}</strong>
+            <div className="info-row">
+              <span>Reward:</span>
+              <strong>{task.reward} tokens</strong>
+            </div>
+            <div className="info-row">
+              <span>Workers Needed:</span>
+              <strong>{task.workerCount}</strong>
+            </div>
+            <div className="info-row">
+              <span>Status:</span>
+              <strong className={`status ${task.status}`}>{task.status}</strong>
             </div>
           </div>
           
+          <div className="description-section">
+            <h3>Description</h3>
+            <p>{task.description}</p>
+          </div>
+          
           <div className="data-section">
-            <h3>Encrypted Reward Data</h3>
+            <h3>Encrypted Data</h3>
             <div className="data-row">
-              <div className="data-label">Reward Value:</div>
+              <div className="data-label">Encrypted Value:</div>
               <div className="data-value">
                 {task.isVerified ? 
-                  `${task.decryptedValue} tokens (On-chain Verified)` : 
-                  localDecrypted !== null ? 
-                  `${localDecrypted} tokens (Locally Decrypted)` : 
+                  `${task.decryptedValue} (Verified)` : 
+                  decryptedValue !== null ? 
+                  `${decryptedValue} (Decrypted)` : 
                   "🔒 FHE Encrypted"
                 }
               </div>
+              <button 
+                className={`decrypt-btn ${(task.isVerified || decryptedValue !== null) ? 'decrypted' : ''}`}
+                onClick={handleDecrypt} 
+                disabled={isDecrypting || task.isVerified}
+              >
+                {isDecrypting ? "Decrypting..." : 
+                 task.isVerified ? "✅ Verified" : 
+                 decryptedValue !== null ? "🔓 Decrypted" : 
+                 "🔓 Decrypt Data"}
+              </button>
             </div>
             
-            <button 
-              className={`decrypt-btn large ${(task.isVerified || localDecrypted !== null) ? 'decrypted' : ''}`}
-              onClick={handleDecrypt}
-              disabled={isDecrypting}
-            >
-              {isDecrypting ? "Decrypting..." : task.isVerified ? "✅ Verified" : localDecrypted !== null ? "🔄 Re-verify" : "🔓 Decrypt Reward"}
-            </button>
-            
-            <div className="fhe-explanation">
-              <h4>FHE Protection Process</h4>
-              <ol>
-                <li>Reward value encrypted on-chain using Zama FHE</li>
-                <li>Workers process tasks without accessing raw data</li>
-                <li>Decryption requires proper authorization and verification</li>
-                <li>Results verified on-chain for transparency</li>
-              </ol>
+            <div className="fhe-info">
+              <div className="fhe-icon">🔐</div>
+              <div>
+                <strong>FHE Protected Data</strong>
+                <p>Data is encrypted on-chain using Zama FHE technology</p>
+              </div>
             </div>
           </div>
         </div>
         
         <div className="modal-footer">
           <button onClick={onClose} className="close-btn">Close</button>
+          {!task.isVerified && (
+            <button onClick={handleDecrypt} disabled={isDecrypting} className="verify-btn">
+              Verify on-chain
+            </button>
+          )}
         </div>
       </div>
     </div>
